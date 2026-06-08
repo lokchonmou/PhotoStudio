@@ -1,0 +1,18 @@
+.DS_Store
+
+# Python virtual environments
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Local runtime artifacts
+*.log
+
+# App generated files
+output/
+
+# Optional local sample assets
+input/

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Photo Resize Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <p class="eyebrow">Local-Only Image Studio</p>
+      <h1>Photo Resize Studio</h1>
+      <p class="sub">拖放相片即做。支援 HEIC/HEIF、JPG、PNG，全程本機處理，不上傳。</p>
+    </header>
+
+    <section class="panel controls" aria-labelledby="dropTitle">
+      <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-label="拖放圖片到這裡，或點擊選擇檔案">
+        <p id="dropTitle" class="drop-title">拖動圖片到這裡</p>
+        <p class="drop-sub">或點擊選擇檔案</p>
+        <p class="drop-hint">支援：HEIC/HEIF、JPG、PNG、WEBP、BMP、TIFF</p>
+      </div>
+
+      <input id="fileInput" class="hidden-input" type="file" accept="image/*,.heic,.heif" multiple />
+
+      <div class="queue-head">
+        <p class="queue-title">待處理清單</p>
+        <p id="queueCount" class="queue-count">0 個檔案</p>
+      </div>
+      <div id="queueList" class="queue-list"></div>
+
+      <div class="grid">
+        <label class="field">
+          <span>長邊尺寸 (px)</span>
+          <input id="maxEdge" type="number" min="100" max="10000" value="1200" />
+        </label>
+
+        <label class="field">
+          <span>JPG 品質 (%)</span>
+          <input id="quality" type="number" min="1" max="100" value="85" />
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="processBtn" class="btn primary">開始處理</button>
+        <button id="downloadBtn" class="btn" disabled>下載全部 JPG</button>
+        <button id="clearBtn" class="btn ghost">清空</button>
+      </div>
+
+      <p id="status" class="status">未開始</p>
+    </section>
+
+    <section class="panel">
+      <div class="list-head">
+        <h2>結果</h2>
+        <p id="count">0 個檔案</p>
+      </div>
+      <div id="resultList" class="result-list"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/libheif-js@1.19.8/libheif-wasm/libheif-bundle.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
