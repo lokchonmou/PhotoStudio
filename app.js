@@ -4,7 +4,12 @@ const qualityInput = document.getElementById('quality');
 const processBtn = document.getElementById('processBtn');
 const downloadBtn = document.getElementById('downloadBtn');
 const clearBtn = document.getElementById('clearBtn');
+const renameModeInput = document.getElementById('renameMode');
+const renameTextInput = document.getElementById('renameText');
+const renameDigitsInput = document.getElementById('renameDigits');
+const renameSeparatorInput = document.getElementById('renameSeparator');
 const statusEl = document.getElementById('status');
+const reportEl = document.getElementById('report');
 const countEl = document.getElementById('count');
 const resultList = document.getElementById('resultList');
 const dropZone = document.getElementById('dropZone');
@@ -13,6 +18,17 @@ const queueCount = document.getElementById('queueCount');
 
 let processedItems = [];
 let selectedFiles = [];
+const supportedExtensions = new Set([
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.bmp',
+  '.tif',
+  '.tiff',
+  '.heic',
+  '.heif',
+]);
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -30,6 +46,111 @@ function getOutputName(name) {
   const dot = name.lastIndexOf('.');
   const base = dot > 0 ? name.slice(0, dot) : name;
   return `${base}.jpg`;
+}
+
+function getBaseName(name) {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function getExtension(name) {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot).toLowerCase() : '';
+}
+
+function isSupportedInputFile(file) {
+  if (isHeicFile(file)) {
+    return true;
+  }
+
+  if (supportedExtensions.has(getExtension(file.name))) {
+    return true;
+  }
+
+  return typeof file.type === 'string' && file.type.startsWith('image/');
+}
+
+function splitFilesBySupport(files) {
+  const supportedFiles = [];
+  const unsupportedFiles = [];
+  for (const file of files) {
+    if (isSupportedInputFile(file)) {
+      supportedFiles.push(file);
+    } else {
+      unsupportedFiles.push(file);
+    }
+  }
+  return { supportedFiles, unsupportedFiles };
+}
+
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function joinWithSeparator(left, right, separator) {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return `${left}${separator}${right}`;
+}
+
+function buildOutputName(file, outputIndex, renameOptions) {
+  if (renameOptions.mode === 'keep') {
+    return getOutputName(file.name);
+  }
+
+  const base = renameOptions.text || getBaseName(file.name);
+  const number = String(outputIndex + 1).padStart(renameOptions.digits, '0');
+  const separator = renameOptions.separator;
+
+  if (renameOptions.mode === 'prefix') {
+    return `${joinWithSeparator(number, base, separator)}.jpg`;
+  }
+
+  if (renameOptions.mode === 'middle') {
+    const splitAt = Math.ceil(base.length / 2);
+    const left = base.slice(0, splitAt);
+    const right = base.slice(splitAt);
+    const firstPart = joinWithSeparator(left, number, separator);
+    return `${joinWithSeparator(firstPart, right, separator)}.jpg`;
+  }
+
+  return `${joinWithSeparator(base, number, separator)}.jpg`;
+}
+
+function getRenameOptions() {
+  const mode = renameModeInput.value;
+  const text = (renameTextInput.value || '').trim().slice(0, 80);
+  renameTextInput.value = text;
+  const digits = clampInteger(renameDigitsInput.value, 1, 12, 3);
+  renameDigitsInput.value = String(digits);
+  const separator = (renameSeparatorInput.value || '').slice(0, 8);
+  renameSeparatorInput.value = separator;
+
+  return {
+    mode: ['keep', 'prefix', 'middle', 'suffix'].includes(mode) ? mode : 'keep',
+    text,
+    digits,
+    separator,
+  };
+}
+
+function formatNameList(files) {
+  if (files.length === 0) {
+    return '';
+  }
+  return files.map((file) => file.name).join('、');
+}
+
+function setReport(text) {
+  reportEl.textContent = text;
 }
 
 function isHeicFile(file) {
@@ -343,6 +464,7 @@ function clearResults() {
   }
   processedItems = [];
   renderResults();
+  setReport('');
   setStatus('已清空');
 }
 
@@ -358,28 +480,67 @@ async function processAll() {
   const files = selectedFiles;
   if (files.length === 0) {
     setStatus('請先拖放或選擇圖片');
+    setReport('');
     return;
   }
 
   const maxEdge = clampNumber(maxEdgeInput.value, 100, 10000, 1200);
   const quality = clampNumber(qualityInput.value, 1, 100, 85);
+  const renameOptions = getRenameOptions();
   maxEdgeInput.value = String(maxEdge);
   qualityInput.value = String(quality);
 
+  const { supportedFiles, unsupportedFiles } = splitFilesBySupport(files);
   clearResults();
+  setReport('');
   processBtn.disabled = true;
 
   try {
-    for (let i = 0; i < files.length; i += 1) {
-      const file = files[i];
-      setStatus(`處理中 ${i + 1}/${files.length}: ${file.name}`);
-      const resized = await resizeFile(file, maxEdge, quality);
-      processedItems.push(resized);
+    if (supportedFiles.length === 0) {
+      setStatus('全部檔案都不支援，未有可處理圖片');
+      setReport(`未處理（不支援格式）：${formatNameList(unsupportedFiles)}`);
+      return;
+    }
+
+    const failedFiles = [];
+
+    for (let i = 0; i < supportedFiles.length; i += 1) {
+      const file = supportedFiles[i];
+      const outputName = buildOutputName(file, i, renameOptions);
+      setStatus(`處理中 ${i + 1}/${supportedFiles.length}: ${file.name}`);
+
+      try {
+        const resized = await resizeFile(file, maxEdge, quality);
+        resized.outputName = outputName;
+        processedItems.push(resized);
+        renderResults();
+      } catch (error) {
+        failedFiles.push({ name: file.name });
+      }
+    }
+
+    const unsupportedCount = unsupportedFiles.length;
+    const failedCount = failedFiles.length;
+    const skippedCount = unsupportedCount + failedCount;
+
+    let summary = `完成，共 ${processedItems.length}/${supportedFiles.length} 個支援格式檔案`;
+    if (skippedCount > 0) {
+      summary += `，另有 ${skippedCount} 個未處理`;
+    }
+    setStatus(summary);
+
+    const reportParts = [];
+    if (unsupportedCount > 0) {
+      reportParts.push(`不支援格式未處理：${formatNameList(unsupportedFiles)}`);
+    }
+    if (failedCount > 0) {
+      reportParts.push(`處理失敗未輸出：${failedFiles.map((item) => item.name).join('、')}`);
+    }
+    setReport(reportParts.join(' ｜ '));
+
+    if (processedItems.length > 0) {
       renderResults();
     }
-    setStatus(`完成，共 ${processedItems.length} 個檔案`);
-  } catch (error) {
-    setStatus(error.message || '處理失敗');
   } finally {
     processBtn.disabled = false;
   }

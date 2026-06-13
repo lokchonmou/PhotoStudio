@@ -39,6 +39,31 @@
           <span>JPG 品質 (%)</span>
           <input id="quality" type="number" min="1" max="100" value="85" />
         </label>
+
+        <label class="field">
+          <span>批次改名：數字位置</span>
+          <select id="renameMode">
+            <option value="keep">保持原檔名</option>
+            <option value="prefix">數字在前（001-文字）</option>
+            <option value="middle">數字在中（文-001-字）</option>
+            <option value="suffix">數字在後（文字-001）</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>改名文字（留空=用原檔名）</span>
+          <input id="renameText" type="text" value="" maxlength="80" placeholder="例如：旅行相" />
+        </label>
+
+        <label class="field">
+          <span>流水號位數 (digit)</span>
+          <input id="renameDigits" type="number" min="1" max="12" value="3" />
+        </label>
+
+        <label class="field">
+          <span>文字與數字分隔字元</span>
+          <input id="renameSeparator" type="text" value="-" maxlength="8" />
+        </label>
       </div>
 
       <div class="actions">
@@ -48,6 +73,7 @@
       </div>
 
       <p id="status" class="status">未開始</p>
+      <p id="report" class="report"></p>
     </section>
 
     <section class="panel">

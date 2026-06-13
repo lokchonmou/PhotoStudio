@@ -6,6 +6,8 @@ Current feature (v1):
 - Resize images in browser and export JPG
 - Drag and drop UI
 - HEIC/HEIF, JPG, PNG, WEBP, BMP, TIFF input support
+- Pre-scan unsupported files before batch processing, then report skipped filenames
+- Batch rename options: custom rename text, number position (prefix/middle/suffix), digit count, separator char
 - No upload: all processing runs locally in your browser
 
 ## Quick Start

@@ -189,6 +189,8 @@ h1 {
 }
 
 input[type="number"],
+input[type="text"],
+select,
 input[type="file"] {
   width: 100%;
   border: 1px solid var(--line);
@@ -235,6 +237,13 @@ input[type="file"] {
   margin: 12px 0 0;
   font-weight: 600;
   color: var(--muted);
+}
+
+.report {
+  margin: 8px 0 0;
+  color: #b42318;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .list-head {
