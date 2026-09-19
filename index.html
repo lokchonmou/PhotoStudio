@@ -24,6 +24,25 @@
       </div>
     </header>
 
+    <section class="panel summary-grid" aria-label="本機處理與技術棧">
+      <article class="summary-card">
+        <h2>Local-first 私隱優先</h2>
+        <p>
+          圖片縮放、HEIC/HEIF 解碼、人面偵測同遮罩全部只在你部機嘅瀏覽器完成。MediaPipe、HEIC
+          解碼器同模型已跟頁面一齊提供，唔使上傳相片去第三方服務。
+        </p>
+      </article>
+      <article class="summary-card">
+        <h2>技術棧</h2>
+        <ul class="tech-list">
+          <li>HTML / CSS / JavaScript</li>
+          <li>Canvas API 圖片縮放與 JPG 匯出</li>
+          <li>MediaPipe Tasks Vision（本機 Face Detector）</li>
+          <li>heic2any + libheif-js（本機 HEIC / HEIF 解碼）</li>
+        </ul>
+      </article>
+    </section>
+
     <section class="panel controls" aria-labelledby="dropTitle">
       <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-label="拖放圖片到這裡，或點擊選擇檔案">
         <p id="dropTitle" class="drop-title">拖動圖片到這裡</p>
@@ -81,7 +100,7 @@
             <input id="faceDetectionEnabled" type="checkbox" />
             <span>剔選後，自動偵測相中面部</span>
           </label>
-          <p class="field-help">完全在瀏覽器處理；首次使用會載入偵測模型。</p>
+          <p class="field-help">完全在瀏覽器處理；模型已內置本頁，舊款 iPhone Safari 可能會慢啲。</p>
         </div>
 
         <label class="field">
@@ -113,8 +132,8 @@
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/libheif-js@1.19.8/libheif-wasm/libheif-bundle.js"></script>
+  <script src="vendor/heic2any/heic2any.min.js"></script>
+  <script src="vendor/libheif/libheif-bundle.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
