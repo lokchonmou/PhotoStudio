@@ -22,6 +22,10 @@ const queueCount = document.getElementById('queueCount');
 let processedItems = [];
 let selectedFiles = [];
 let faceDetectorPromise = null;
+const LOCAL_FACE_TASKS_MODULE = './vendor/mediapipe/vision_bundle.mjs';
+const LOCAL_FACE_WASM_DIR = './vendor/mediapipe/wasm';
+const LOCAL_FACE_MODEL_PATH = './vendor/models/blaze_face_short_range.tflite';
+const FACE_DETECTOR_DELEGATES = ['GPU', 'CPU'];
 
 const supportedExtensions = new Set([
   '.jpg',
@@ -355,21 +359,26 @@ function loadImage(file) {
 async function ensureFaceDetector() {
   if (!faceDetectorPromise) {
     faceDetectorPromise = (async () => {
-      const { FilesetResolver, FaceDetector } = await import(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm'
-      );
-      const fileset = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-      );
-      return FaceDetector.createFromOptions(fileset, {
-        baseOptions: {
-          modelAssetPath:
-            'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite',
-          delegate: 'GPU',
-        },
-        runningMode: 'IMAGE',
-        minDetectionConfidence: 0.5,
-      });
+      const { FilesetResolver, FaceDetector } = await import(LOCAL_FACE_TASKS_MODULE);
+      const fileset = await FilesetResolver.forVisionTasks(LOCAL_FACE_WASM_DIR);
+      let lastError = null;
+
+      for (const delegate of FACE_DETECTOR_DELEGATES) {
+        try {
+          return await FaceDetector.createFromOptions(fileset, {
+            baseOptions: {
+              modelAssetPath: LOCAL_FACE_MODEL_PATH,
+              delegate,
+            },
+            runningMode: 'IMAGE',
+            minDetectionConfidence: 0.5,
+          });
+        } catch (error) {
+          lastError = error;
+        }
+      }
+
+      throw lastError || new Error('FACE_DETECTOR_INIT_FAILED');
     })().catch((error) => {
       faceDetectorPromise = null;
       throw error;
@@ -643,6 +652,15 @@ function syncFaceControls() {
   faceEffectInput.disabled = !faceDetectionEnabledInput.checked;
 }
 
+function getFaceDetectorLoadErrorMessage() {
+  const isAppleMobile = /iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  if (isAppleMobile) {
+    return '未能載入本機人面識別模型。已改用全本機資源；如你用緊 iPhone，請以 http://127.0.0.1 開啟並更新 iOS / Safari 後再試。';
+  }
+
+  return '未能載入本機人面識別模型，請重新整理頁面後再試。';
+}
+
 function getPreferredTheme() {
   try {
     const savedTheme = localStorage.getItem('photostudio-theme');
@@ -704,7 +722,7 @@ async function processAll() {
       try {
         await ensureFaceDetector();
       } catch (error) {
-        throw new Error('未能載入人面識別模型，請確認網絡連線後再試。');
+        throw new Error(getFaceDetectorLoadErrorMessage());
       }
     }
 
