@@ -8,6 +8,9 @@ const renameModeInput = document.getElementById('renameMode');
 const renameTextInput = document.getElementById('renameText');
 const renameDigitsInput = document.getElementById('renameDigits');
 const renameSeparatorInput = document.getElementById('renameSeparator');
+const themeToggleBtn = document.getElementById('themeToggle');
+const faceDetectionEnabledInput = document.getElementById('faceDetectionEnabled');
+const faceEffectInput = document.getElementById('faceEffect');
 const statusEl = document.getElementById('status');
 const reportEl = document.getElementById('report');
 const countEl = document.getElementById('count');
@@ -18,6 +21,8 @@ const queueCount = document.getElementById('queueCount');
 
 let processedItems = [];
 let selectedFiles = [];
+let faceDetectorPromise = null;
+
 const supportedExtensions = new Set([
   '.jpg',
   '.jpeg',
@@ -34,8 +39,20 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+function setReport(text) {
+  reportEl.textContent = text;
+}
+
 function clampNumber(value, min, max, fallback) {
   const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, parsed));
+}
+
+function clampInteger(value, min, max, fallback) {
+  const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) {
     return fallback;
   }
@@ -81,14 +98,6 @@ function splitFilesBySupport(files) {
     }
   }
   return { supportedFiles, unsupportedFiles };
-}
-
-function clampInteger(value, min, max, fallback) {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) {
-    return fallback;
-  }
-  return Math.max(min, Math.min(max, parsed));
 }
 
 function joinWithSeparator(left, right, separator) {
@@ -142,15 +151,19 @@ function getRenameOptions() {
   };
 }
 
+function getFaceOptions() {
+  const effect = faceEffectInput.value;
+  return {
+    enabled: faceDetectionEnabledInput.checked,
+    effect: ['blur', 'pixelate', 'emoji'].includes(effect) ? effect : 'blur',
+  };
+}
+
 function formatNameList(files) {
   if (files.length === 0) {
     return '';
   }
   return files.map((file) => file.name).join('、');
-}
-
-function setReport(text) {
-  reportEl.textContent = text;
 }
 
 function isHeicFile(file) {
@@ -339,12 +352,155 @@ function loadImage(file) {
   });
 }
 
-async function resizeFile(file, maxEdge, qualityPercent) {
+async function ensureFaceDetector() {
+  if (!faceDetectorPromise) {
+    faceDetectorPromise = (async () => {
+      const { FilesetResolver, FaceDetector } = await import(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm'
+      );
+      const fileset = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      return FaceDetector.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath:
+            'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/latest/blaze_face_short_range.tflite',
+          delegate: 'GPU',
+        },
+        runningMode: 'IMAGE',
+        minDetectionConfidence: 0.5,
+      });
+    })().catch((error) => {
+      faceDetectorPromise = null;
+      throw error;
+    });
+  }
+
+  return faceDetectorPromise;
+}
+
+function normalizeFaceRect(boundingBox, canvas) {
+  const x = Math.max(0, Math.floor(boundingBox.originX || 0));
+  const y = Math.max(0, Math.floor(boundingBox.originY || 0));
+  const width = Math.min(canvas.width - x, Math.ceil(boundingBox.width || 0));
+  const height = Math.min(canvas.height - y, Math.ceil(boundingBox.height || 0));
+
+  if (width <= 0 || height <= 0) {
+    return null;
+  }
+
+  return { x, y, width, height };
+}
+
+function createRegionCanvas(sourceCanvas, rect, paddingRatio = 0.15) {
+  const padX = Math.round(rect.width * paddingRatio);
+  const padY = Math.round(rect.height * paddingRatio);
+  const sx = Math.max(0, rect.x - padX);
+  const sy = Math.max(0, rect.y - padY);
+  const sw = Math.min(sourceCanvas.width - sx, rect.width + padX * 2);
+  const sh = Math.min(sourceCanvas.height - sy, rect.height + padY * 2);
+  const regionCanvas = document.createElement('canvas');
+  regionCanvas.width = sw;
+  regionCanvas.height = sh;
+  const regionCtx = regionCanvas.getContext('2d');
+  regionCtx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+  return { regionCanvas, sx, sy, sw, sh };
+}
+
+function applyBlurMask(ctx, sourceCanvas, rect) {
+  const { regionCanvas, sx, sy, sw, sh } = createRegionCanvas(sourceCanvas, rect, 0.2);
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = sw;
+  tempCanvas.height = sh;
+  const tempCtx = tempCanvas.getContext('2d');
+  tempCtx.filter = `blur(${Math.max(14, Math.round(Math.min(rect.width, rect.height) / 5))}px)`;
+  tempCtx.drawImage(regionCanvas, 0, 0, sw, sh);
+  ctx.drawImage(tempCanvas, sx, sy);
+}
+
+function applyPixelateMask(ctx, sourceCanvas, rect) {
+  const sampleCanvas = document.createElement('canvas');
+  const sampleScale = Math.max(6, Math.round(Math.min(rect.width, rect.height) / 12));
+  sampleCanvas.width = Math.max(1, Math.round(rect.width / sampleScale));
+  sampleCanvas.height = Math.max(1, Math.round(rect.height / sampleScale));
+  const sampleCtx = sampleCanvas.getContext('2d');
+  sampleCtx.drawImage(
+    sourceCanvas,
+    rect.x,
+    rect.y,
+    rect.width,
+    rect.height,
+    0,
+    0,
+    sampleCanvas.width,
+    sampleCanvas.height
+  );
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(sampleCanvas, rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
+}
+
+function applyEmojiMask(ctx, rect) {
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  const radiusX = rect.width / 2;
+  const radiusY = rect.height / 2;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(28, 38, 57, 0.22)';
+  ctx.beginPath();
+  ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = `${Math.max(rect.height, rect.width)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🙈', centerX, centerY + rect.height * 0.02);
+  ctx.restore();
+}
+
+async function detectFaces(canvas) {
+  const detector = await ensureFaceDetector();
+  const result = detector.detect(canvas);
+  const detections = result?.detections || [];
+  return detections
+    .map((detection) => normalizeFaceRect(detection.boundingBox, canvas))
+    .filter(Boolean);
+}
+
+async function applyFaceEffects(canvas, effect) {
+  const faces = await detectFaces(canvas);
+
+  if (faces.length === 0) {
+    return 0;
+  }
+
+  const sourceCanvas = document.createElement('canvas');
+  sourceCanvas.width = canvas.width;
+  sourceCanvas.height = canvas.height;
+  const sourceCtx = sourceCanvas.getContext('2d');
+  sourceCtx.drawImage(canvas, 0, 0);
+
+  const ctx = canvas.getContext('2d');
+  for (const rect of faces) {
+    if (effect === 'emoji') {
+      applyEmojiMask(ctx, rect);
+    } else if (effect === 'pixelate') {
+      applyPixelateMask(ctx, sourceCanvas, rect);
+    } else {
+      applyBlurMask(ctx, sourceCanvas, rect);
+    }
+  }
+
+  return faces.length;
+}
+
+async function resizeFile(file, maxEdge, qualityPercent, faceOptions) {
   let image;
 
   if (isHeicFile(file)) {
     try {
-      // Safari / 部分系統可直接原生解碼 HEIC，先走原生路線。
       image = await loadImage(file);
     } catch (nativeError) {
       try {
@@ -391,6 +547,11 @@ async function resizeFile(file, maxEdge, qualityPercent) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(image, 0, 0, nw, nh);
 
+  let faceCount = 0;
+  if (faceOptions.enabled) {
+    faceCount = await applyFaceEffects(canvas, faceOptions.effect);
+  }
+
   const blob = await new Promise((resolve, reject) => {
     canvas.toBlob(
       (result) => {
@@ -411,6 +572,7 @@ async function resizeFile(file, maxEdge, qualityPercent) {
     outputName: getOutputName(file.name),
     originalSize: `${ow}x${oh}`,
     outputSize: `${nw}x${nh}`,
+    faceCount,
     blob,
     url,
   };
@@ -437,7 +599,8 @@ function renderResults() {
 
     const info = document.createElement('p');
     info.className = 'info';
-    info.textContent = `${item.originalSize} -> ${item.outputSize}`;
+    const faceInfo = item.faceCount > 0 ? ` ｜ 面部處理 ${item.faceCount} 處` : '';
+    info.textContent = `${item.originalSize} -> ${item.outputSize}${faceInfo}`;
 
     meta.appendChild(name);
     meta.appendChild(info);
@@ -476,6 +639,39 @@ function clearAll() {
   setStatus('已清空所有檔案');
 }
 
+function syncFaceControls() {
+  faceEffectInput.disabled = !faceDetectionEnabledInput.checked;
+}
+
+function getPreferredTheme() {
+  try {
+    const savedTheme = localStorage.getItem('photostudio-theme');
+    if (savedTheme === 'light' || savedTheme === 'dark') {
+      return savedTheme;
+    }
+  } catch (error) {
+    // ignore localStorage failures
+  }
+
+  return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function updateThemeToggle(theme) {
+  themeToggleBtn.textContent = theme === 'dark' ? '☀️ 白天' : '🌙 黑夜';
+  themeToggleBtn.setAttribute('aria-pressed', String(theme === 'dark'));
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  updateThemeToggle(theme);
+
+  try {
+    localStorage.setItem('photostudio-theme', theme);
+  } catch (error) {
+    // ignore localStorage failures
+  }
+}
+
 async function processAll() {
   const files = selectedFiles;
   if (files.length === 0) {
@@ -487,6 +683,7 @@ async function processAll() {
   const maxEdge = clampNumber(maxEdgeInput.value, 100, 10000, 1200);
   const quality = clampNumber(qualityInput.value, 1, 100, 85);
   const renameOptions = getRenameOptions();
+  const faceOptions = getFaceOptions();
   maxEdgeInput.value = String(maxEdge);
   qualityInput.value = String(quality);
 
@@ -502,7 +699,17 @@ async function processAll() {
       return;
     }
 
+    if (faceOptions.enabled) {
+      setStatus('初始化人面識別模型中…');
+      try {
+        await ensureFaceDetector();
+      } catch (error) {
+        throw new Error('未能載入人面識別模型，請確認網絡連線後再試。');
+      }
+    }
+
     const failedFiles = [];
+    let totalFaceCount = 0;
 
     for (let i = 0; i < supportedFiles.length; i += 1) {
       const file = supportedFiles[i];
@@ -510,12 +717,13 @@ async function processAll() {
       setStatus(`處理中 ${i + 1}/${supportedFiles.length}: ${file.name}`);
 
       try {
-        const resized = await resizeFile(file, maxEdge, quality);
+        const resized = await resizeFile(file, maxEdge, quality, faceOptions);
         resized.outputName = outputName;
+        totalFaceCount += resized.faceCount || 0;
         processedItems.push(resized);
         renderResults();
       } catch (error) {
-        failedFiles.push({ name: file.name });
+        failedFiles.push({ name: file.name, message: error.message || '未知錯誤' });
       }
     }
 
@@ -524,6 +732,9 @@ async function processAll() {
     const skippedCount = unsupportedCount + failedCount;
 
     let summary = `完成，共 ${processedItems.length}/${supportedFiles.length} 個支援格式檔案`;
+    if (faceOptions.enabled) {
+      summary += `，共處理 ${totalFaceCount} 個面部`;
+    }
     if (skippedCount > 0) {
       summary += `，另有 ${skippedCount} 個未處理`;
     }
@@ -536,11 +747,17 @@ async function processAll() {
     if (failedCount > 0) {
       reportParts.push(`處理失敗未輸出：${failedFiles.map((item) => item.name).join('、')}`);
     }
+    if (faceOptions.enabled && totalFaceCount === 0 && processedItems.length > 0) {
+      reportParts.push('已啟用人面識別，但今次未偵測到面部。');
+    }
     setReport(reportParts.join(' ｜ '));
 
     if (processedItems.length > 0) {
       renderResults();
     }
+  } catch (error) {
+    setStatus('處理中止');
+    setReport(error.message || '發生未知錯誤');
   } finally {
     processBtn.disabled = false;
   }
@@ -553,7 +770,6 @@ async function downloadAll() {
 
   setStatus(`開始下載 ${processedItems.length} 個檔案`);
 
-  // 用短延遲分批觸發下載，減少瀏覽器阻擋機會。
   for (let i = 0; i < processedItems.length; i += 1) {
     const item = processedItems[i];
     const a = document.createElement('a');
@@ -575,6 +791,11 @@ async function downloadAll() {
 processBtn.addEventListener('click', processAll);
 downloadBtn.addEventListener('click', downloadAll);
 clearBtn.addEventListener('click', clearAll);
+themeToggleBtn.addEventListener('click', () => {
+  const nextTheme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(nextTheme);
+});
+faceDetectionEnabledInput.addEventListener('change', syncFaceControls);
 fileInput.addEventListener('change', () => {
   addFiles(Array.from(fileInput.files || []));
   fileInput.value = '';
@@ -612,4 +833,6 @@ dropZone.addEventListener('drop', (event) => {
   }
 });
 
+applyTheme(getPreferredTheme());
+syncFaceControls();
 renderQueue();
