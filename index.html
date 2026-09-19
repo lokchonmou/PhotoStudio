@@ -9,9 +9,19 @@
 <body>
   <main class="app">
     <header class="hero">
-      <p class="eyebrow">PhotoStudio</p>
-      <h1>Resize Studio</h1>
+      <div class="hero-top">
+        <div>
+          <p class="eyebrow">PhotoStudio</p>
+          <h1>Resize Studio</h1>
+        </div>
+        <button id="themeToggle" class="theme-toggle" type="button" aria-label="切換黑白模式">🌙 黑夜</button>
+      </div>
       <p class="sub">拖放相片即做。支援 HEIC/HEIF、JPG、PNG，全程本機處理，不上傳。</p>
+      <div class="hero-badges">
+        <span class="badge">黑 / 白模式</span>
+        <span class="badge">本機人面遮罩</span>
+        <span class="badge">批次改名</span>
+      </div>
     </header>
 
     <section class="panel controls" aria-labelledby="dropTitle">
@@ -63,6 +73,24 @@
         <label class="field">
           <span>文字與數字分隔字元</span>
           <input id="renameSeparator" type="text" value="-" maxlength="8" />
+        </label>
+
+        <div class="field feature-card">
+          <span>人面識別遮罩</span>
+          <label class="check-row" for="faceDetectionEnabled">
+            <input id="faceDetectionEnabled" type="checkbox" />
+            <span>剔選後，自動偵測相中面部</span>
+          </label>
+          <p class="field-help">完全在瀏覽器處理；首次使用會載入偵測模型。</p>
+        </div>
+
+        <label class="field">
+          <span>面部處理方式</span>
+          <select id="faceEffect" disabled>
+            <option value="blur">Blur</option>
+            <option value="pixelate">打碼</option>
+            <option value="emoji">Emoji cover</option>
+          </select>
         </label>
       </div>
 
