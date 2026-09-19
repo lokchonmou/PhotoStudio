@@ -11,6 +11,12 @@ const renameSeparatorInput = document.getElementById('renameSeparator');
 const themeToggleBtn = document.getElementById('themeToggle');
 const faceDetectionEnabledInput = document.getElementById('faceDetectionEnabled');
 const faceEffectInput = document.getElementById('faceEffect');
+const faceConfidenceInput = document.getElementById('faceConfidence');
+const faceConfidenceValueEl = document.getElementById('faceConfidenceValue');
+const effectStrengthInput = document.getElementById('effectStrength');
+const effectStrengthValueEl = document.getElementById('effectStrengthValue');
+const effectStrengthLabelEl = document.getElementById('effectStrengthLabel');
+const effectStrengthHintEl = document.getElementById('effectStrengthHint');
 const statusEl = document.getElementById('status');
 const reportEl = document.getElementById('report');
 const countEl = document.getElementById('count');
@@ -22,10 +28,56 @@ const queueCount = document.getElementById('queueCount');
 let processedItems = [];
 let selectedFiles = [];
 let faceDetectorPromise = null;
+let faceDetector = null;
+let faceDetectorConfidence = null;
 const LOCAL_FACE_TASKS_MODULE = './vendor/mediapipe/vision_bundle.mjs';
 const LOCAL_FACE_WASM_DIR = './vendor/mediapipe/wasm';
 const LOCAL_FACE_MODEL_PATH = './vendor/models/blaze_face_short_range.tflite';
 const FACE_DETECTOR_DELEGATES = ['GPU', 'CPU'];
+const DEFAULT_FACE_DETECTION_CONFIDENCE = 0.4;
+const FACE_DETECT_MAX_EDGE = 1920;
+const FACE_CANDIDATE_IOU_THRESHOLD = 0.45;
+const MAX_FACE_CANDIDATES = 10;
+const FACE_LOWER_REGION_SUPPRESS_Y = 0.72;
+const FACE_ROI_SCAN_REGIONS = [
+  { x: 0, y: 0, width: 1, height: 0.74, weightBoost: 0.24 },
+  { x: 0.08, y: 0.03, width: 0.84, height: 0.7, weightBoost: 0.2 },
+];
+
+const EFFECT_STRENGTH_CONFIG = {
+  blur: {
+    label: 'Blur 濃度',
+    hint: '越高越朦，遮蔽力更強。',
+    min: 0.6,
+    max: 2.5,
+    step: 0.05,
+    defaultValue: 1,
+  },
+  pixelate: {
+    label: '打碼濃度',
+    hint: '越高格仔越粗，越難辨認。',
+    min: 0.6,
+    max: 2.5,
+    step: 0.05,
+    defaultValue: 1,
+  },
+  emoji: {
+    label: 'Emoji 覆蓋濃度',
+    hint: '越高遮蓋底色越深、emoji 越搶眼。',
+    min: 0.6,
+    max: 2,
+    step: 0.05,
+    defaultValue: 1,
+  },
+};
+
+const effectStrengthState = {
+  blur: EFFECT_STRENGTH_CONFIG.blur.defaultValue,
+  pixelate: EFFECT_STRENGTH_CONFIG.pixelate.defaultValue,
+  emoji: EFFECT_STRENGTH_CONFIG.emoji.defaultValue,
+};
+
+let supportsCanvasBlurFilterCache = null;
 
 const supportedExtensions = new Set([
   '.jpg',
@@ -157,9 +209,45 @@ function getRenameOptions() {
 
 function getFaceOptions() {
   const effect = faceEffectInput.value;
+  const effectConfig = EFFECT_STRENGTH_CONFIG[effect] || EFFECT_STRENGTH_CONFIG.blur;
+  const confidence = clampNumber(faceConfidenceInput.value, 0.1, 0.95, DEFAULT_FACE_DETECTION_CONFIDENCE);
+  const currentEffectStrength = clampNumber(
+    effectStrengthInput.value,
+    effectConfig.min,
+    effectConfig.max,
+    effectConfig.defaultValue
+  );
+
+  faceConfidenceInput.value = confidence.toFixed(2);
+  effectStrengthState[effect] = currentEffectStrength;
+  effectStrengthInput.value = currentEffectStrength.toFixed(2);
+
+  const blurStrength = clampNumber(
+    effect === 'blur' ? currentEffectStrength : effectStrengthState.blur,
+    EFFECT_STRENGTH_CONFIG.blur.min,
+    EFFECT_STRENGTH_CONFIG.blur.max,
+    EFFECT_STRENGTH_CONFIG.blur.defaultValue
+  );
+  const pixelateStrength = clampNumber(
+    effect === 'pixelate' ? currentEffectStrength : effectStrengthState.pixelate,
+    EFFECT_STRENGTH_CONFIG.pixelate.min,
+    EFFECT_STRENGTH_CONFIG.pixelate.max,
+    EFFECT_STRENGTH_CONFIG.pixelate.defaultValue
+  );
+  const emojiStrength = clampNumber(
+    effect === 'emoji' ? currentEffectStrength : effectStrengthState.emoji,
+    EFFECT_STRENGTH_CONFIG.emoji.min,
+    EFFECT_STRENGTH_CONFIG.emoji.max,
+    EFFECT_STRENGTH_CONFIG.emoji.defaultValue
+  );
+
   return {
     enabled: faceDetectionEnabledInput.checked,
     effect: ['blur', 'pixelate', 'emoji'].includes(effect) ? effect : 'blur',
+    confidence,
+    blurStrength,
+    pixelateStrength,
+    emojiStrength,
   };
 }
 
@@ -356,7 +444,25 @@ function loadImage(file) {
   });
 }
 
-async function ensureFaceDetector() {
+async function ensureFaceDetector(confidence = DEFAULT_FACE_DETECTION_CONFIDENCE) {
+  const normalizedConfidence = clampNumber(confidence, 0.1, 0.95, DEFAULT_FACE_DETECTION_CONFIDENCE);
+
+  if (faceDetector && faceDetectorConfidence !== null && Math.abs(faceDetectorConfidence - normalizedConfidence) < 0.0001) {
+    return faceDetector;
+  }
+
+  if (faceDetector && typeof faceDetector.close === 'function') {
+    try {
+      faceDetector.close();
+    } catch (error) {
+      // ignore close errors
+    }
+  }
+
+  faceDetector = null;
+  faceDetectorPromise = null;
+  faceDetectorConfidence = null;
+
   if (!faceDetectorPromise) {
     faceDetectorPromise = (async () => {
       const { FilesetResolver, FaceDetector } = await import(LOCAL_FACE_TASKS_MODULE);
@@ -365,14 +471,18 @@ async function ensureFaceDetector() {
 
       for (const delegate of FACE_DETECTOR_DELEGATES) {
         try {
-          return await FaceDetector.createFromOptions(fileset, {
+            const detector = await FaceDetector.createFromOptions(fileset, {
             baseOptions: {
               modelAssetPath: LOCAL_FACE_MODEL_PATH,
               delegate,
             },
             runningMode: 'IMAGE',
-            minDetectionConfidence: 0.5,
+            minDetectionConfidence: normalizedConfidence,
           });
+
+          faceDetector = detector;
+          faceDetectorConfidence = normalizedConfidence;
+          return detector;
         } catch (error) {
           lastError = error;
         }
@@ -380,6 +490,8 @@ async function ensureFaceDetector() {
 
       throw lastError || new Error('FACE_DETECTOR_INIT_FAILED');
     })().catch((error) => {
+      faceDetector = null;
+      faceDetectorConfidence = null;
       faceDetectorPromise = null;
       throw error;
     });
@@ -401,6 +513,67 @@ function normalizeFaceRect(boundingBox, canvas) {
   return { x, y, width, height };
 }
 
+function fitRectInCanvas(rect, canvas) {
+  const x = Math.max(0, Math.min(canvas.width - 1, Math.round(rect.x)));
+  const y = Math.max(0, Math.min(canvas.height - 1, Math.round(rect.y)));
+  const width = Math.max(1, Math.min(canvas.width - x, Math.round(rect.width)));
+  const height = Math.max(1, Math.min(canvas.height - y, Math.round(rect.height)));
+  return { x, y, width, height };
+}
+
+function tuneFaceRect(rect, canvas, effect) {
+  const widthRatio = effect === 'emoji' ? 0.92 : 0.9;
+  const heightRatio = effect === 'emoji' ? 0.84 : 0.86;
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height * 0.46;
+  const tunedRect = {
+    x: centerX - (rect.width * widthRatio) / 2,
+    y: centerY - (rect.height * heightRatio) / 2,
+    width: rect.width * widthRatio,
+    height: rect.height * heightRatio,
+  };
+
+  return fitRectInCanvas(tunedRect, canvas);
+}
+
+function supportsCanvasBlurFilter() {
+  if (supportsCanvasBlurFilterCache !== null) {
+    return supportsCanvasBlurFilterCache;
+  }
+
+  const probe = document.createElement('canvas');
+  probe.width = 10;
+  probe.height = 10;
+  const probeCtx = probe.getContext('2d');
+
+  if (!probeCtx || typeof probeCtx.filter !== 'string') {
+    supportsCanvasBlurFilterCache = false;
+    return supportsCanvasBlurFilterCache;
+  }
+
+  probeCtx.fillStyle = '#000000';
+  probeCtx.fillRect(0, 0, 5, 10);
+  probeCtx.fillStyle = '#ffffff';
+  probeCtx.fillRect(5, 0, 5, 10);
+
+  const blurred = document.createElement('canvas');
+  blurred.width = 10;
+  blurred.height = 10;
+  const blurredCtx = blurred.getContext('2d');
+
+  if (!blurredCtx || typeof blurredCtx.filter !== 'string') {
+    supportsCanvasBlurFilterCache = false;
+    return supportsCanvasBlurFilterCache;
+  }
+
+  blurredCtx.filter = 'blur(2px)';
+  blurredCtx.drawImage(probe, 0, 0);
+
+  const centerPixel = blurredCtx.getImageData(5, 5, 1, 1).data[0];
+  supportsCanvasBlurFilterCache = centerPixel > 15 && centerPixel < 240;
+  return supportsCanvasBlurFilterCache;
+}
+
 function createRegionCanvas(sourceCanvas, rect, paddingRatio = 0.15) {
   const padX = Math.round(rect.width * paddingRatio);
   const padY = Math.round(rect.height * paddingRatio);
@@ -416,20 +589,50 @@ function createRegionCanvas(sourceCanvas, rect, paddingRatio = 0.15) {
   return { regionCanvas, sx, sy, sw, sh };
 }
 
-function applyBlurMask(ctx, sourceCanvas, rect) {
-  const { regionCanvas, sx, sy, sw, sh } = createRegionCanvas(sourceCanvas, rect, 0.2);
+function applyBlurMaskFallback(ctx, sourceCanvas, sx, sy, sw, sh, blurRadius) {
+  const strength = Math.max(8, Math.round(blurRadius * 1.1));
+  const tinyCanvas = document.createElement('canvas');
+  tinyCanvas.width = Math.max(1, Math.round(sw / strength));
+  tinyCanvas.height = Math.max(1, Math.round(sh / strength));
+  const tinyCtx = tinyCanvas.getContext('2d');
+  tinyCtx.imageSmoothingEnabled = true;
+  tinyCtx.imageSmoothingQuality = 'high';
+  tinyCtx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, tinyCanvas.width, tinyCanvas.height);
+
+  const blurredCanvas = document.createElement('canvas');
+  blurredCanvas.width = sw;
+  blurredCanvas.height = sh;
+  const blurredCtx = blurredCanvas.getContext('2d');
+  blurredCtx.imageSmoothingEnabled = true;
+  blurredCtx.imageSmoothingQuality = 'high';
+  blurredCtx.drawImage(tinyCanvas, 0, 0, tinyCanvas.width, tinyCanvas.height, 0, 0, sw, sh);
+
+  ctx.drawImage(blurredCanvas, sx, sy);
+}
+
+function applyBlurMask(ctx, sourceCanvas, rect, intensity = 1) {
+  const blurIntensity = clampNumber(intensity, 0.6, 2.5, 1);
+  const { regionCanvas, sx, sy, sw, sh } = createRegionCanvas(sourceCanvas, rect, 0.14);
+  const blurRadius = Math.max(10, Math.round((Math.min(rect.width, rect.height) / 5) * blurIntensity));
+
+  if (!supportsCanvasBlurFilter()) {
+    applyBlurMaskFallback(ctx, sourceCanvas, sx, sy, sw, sh, blurRadius);
+    return;
+  }
+
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = sw;
   tempCanvas.height = sh;
   const tempCtx = tempCanvas.getContext('2d');
-  tempCtx.filter = `blur(${Math.max(14, Math.round(Math.min(rect.width, rect.height) / 5))}px)`;
+  tempCtx.filter = `blur(${blurRadius}px)`;
   tempCtx.drawImage(regionCanvas, 0, 0, sw, sh);
   ctx.drawImage(tempCanvas, sx, sy);
 }
 
-function applyPixelateMask(ctx, sourceCanvas, rect) {
+function applyPixelateMask(ctx, sourceCanvas, rect, intensity = 1) {
+  const pixelateIntensity = clampNumber(intensity, 0.6, 2.5, 1);
   const sampleCanvas = document.createElement('canvas');
-  const sampleScale = Math.max(6, Math.round(Math.min(rect.width, rect.height) / 12));
+  const sampleScale = Math.max(4, Math.round((Math.min(rect.width, rect.height) / 12) * pixelateIntensity));
   sampleCanvas.width = Math.max(1, Math.round(rect.width / sampleScale));
   sampleCanvas.height = Math.max(1, Math.round(rect.height / sampleScale));
   const sampleCtx = sampleCanvas.getContext('2d');
@@ -451,35 +654,364 @@ function applyPixelateMask(ctx, sourceCanvas, rect) {
   ctx.restore();
 }
 
-function applyEmojiMask(ctx, rect) {
+function applyEmojiMask(ctx, rect, intensity = 1) {
+  const emojiIntensity = clampNumber(intensity, 0.6, 2, 1);
   const centerX = rect.x + rect.width / 2;
   const centerY = rect.y + rect.height / 2;
-  const radiusX = rect.width / 2;
-  const radiusY = rect.height / 2;
+  const radiusX = (rect.width / 2) * Math.min(1.08, 0.9 + emojiIntensity * 0.1);
+  const radiusY = (rect.height / 2) * Math.min(1.04, 0.88 + emojiIntensity * 0.08);
+  const fontSize = Math.round(Math.max(rect.height, rect.width) * (0.76 + emojiIntensity * 0.28));
+  const backdropAlpha = Math.max(0.35, Math.min(0.82, 0.35 + emojiIntensity * 0.23));
 
   ctx.save();
-  ctx.fillStyle = 'rgba(28, 38, 57, 0.22)';
+  ctx.fillStyle = `rgba(8, 17, 31, ${backdropAlpha.toFixed(2)})`;
   ctx.beginPath();
   ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
   ctx.fill();
-  ctx.font = `${Math.max(rect.height, rect.width)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+  ctx.globalAlpha = 1;
+  ctx.font = `${fontSize}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
   ctx.fillText('🙈', centerX, centerY + rect.height * 0.02);
   ctx.restore();
 }
 
-async function detectFaces(canvas) {
-  const detector = await ensureFaceDetector();
-  const result = detector.detect(canvas);
-  const detections = result?.detections || [];
-  return detections
-    .map((detection) => normalizeFaceRect(detection.boundingBox, canvas))
-    .filter(Boolean);
+function createDetectionInputCanvas(source, sourceSize) {
+  if (source && source.tagName === 'CANVAS') {
+    return source;
+  }
+
+  const width = Math.max(1, Math.round(sourceSize?.width || source?.width || 1));
+  const height = Math.max(1, Math.round(sourceSize?.height || source?.height || 1));
+  const scale = Math.min(1, FACE_DETECT_MAX_EDGE / Math.max(width, height));
+  const targetWidth = Math.max(1, Math.round(width * scale));
+  const targetHeight = Math.max(1, Math.round(height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(source, 0, 0, targetWidth, targetHeight);
+  return canvas;
 }
 
-async function applyFaceEffects(canvas, effect) {
-  const faces = await detectFaces(canvas);
+function createContrastNormalizedCanvas(sourceCanvas) {
+  const canvas = document.createElement('canvas');
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(sourceCanvas, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  let minLuma = 255;
+  let maxLuma = 0;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const luma = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    if (luma < minLuma) {
+      minLuma = luma;
+    }
+    if (luma > maxLuma) {
+      maxLuma = luma;
+    }
+  }
+
+  const lumaRange = Math.max(1, maxLuma - minLuma);
+  if (lumaRange < 12) {
+    return null;
+  }
+
+  const gamma = 0.92;
+  for (let i = 0; i < data.length; i += 4) {
+    const luma = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    const stretched = Math.max(0, Math.min(1, (luma - minLuma) / lumaRange));
+    const corrected = Math.pow(stretched, gamma);
+    const gray = Math.round(corrected * 255);
+    data[i] = gray;
+    data[i + 1] = gray;
+    data[i + 2] = gray;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function createSoftenedCanvas(sourceCanvas) {
+  const canvas = document.createElement('canvas');
+  canvas.width = sourceCanvas.width;
+  canvas.height = sourceCanvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(sourceCanvas, 0, 0);
+
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imageData.data;
+  const gamma = 1.18;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = Math.pow(data[i] / 255, gamma) * 255;
+    const g = Math.pow(data[i + 1] / 255, gamma) * 255;
+    const b = Math.pow(data[i + 2] / 255, gamma) * 255;
+    data[i] = Math.min(255, Math.max(0, Math.round(r + 4)));
+    data[i + 1] = Math.min(255, Math.max(0, Math.round(g + 4)));
+    data[i + 2] = Math.min(255, Math.max(0, Math.round(b + 4)));
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function createRoiScanCanvas(sourceCanvas, region) {
+  const sx = Math.max(0, Math.round(sourceCanvas.width * region.x));
+  const sy = Math.max(0, Math.round(sourceCanvas.height * region.y));
+  const sw = Math.max(1, Math.round(sourceCanvas.width * region.width));
+  const sh = Math.max(1, Math.round(sourceCanvas.height * region.height));
+  const clippedWidth = Math.min(sw, sourceCanvas.width - sx);
+  const clippedHeight = Math.min(sh, sourceCanvas.height - sy);
+
+  if (clippedWidth <= 0 || clippedHeight <= 0) {
+    return null;
+  }
+
+  const roiCanvas = document.createElement('canvas');
+  roiCanvas.width = clippedWidth;
+  roiCanvas.height = clippedHeight;
+  const roiCtx = roiCanvas.getContext('2d');
+  roiCtx.imageSmoothingEnabled = true;
+  roiCtx.imageSmoothingQuality = 'high';
+  roiCtx.drawImage(
+    sourceCanvas,
+    sx,
+    sy,
+    clippedWidth,
+    clippedHeight,
+    0,
+    0,
+    clippedWidth,
+    clippedHeight
+  );
+
+  return {
+    canvas: roiCanvas,
+    sx,
+    sy,
+    sw: clippedWidth,
+    sh: clippedHeight,
+  };
+}
+
+function mapRectFromRoiToBase(rect, roiMeta) {
+  if (!roiMeta || roiMeta.sw <= 0 || roiMeta.sh <= 0) {
+    return rect;
+  }
+
+  return {
+    x: roiMeta.sx + rect.x,
+    y: roiMeta.sy + rect.y,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function getDetectionVariants(baseCanvas) {
+  const variants = [{ canvas: baseCanvas, weight: 1 }];
+  const normalized = createContrastNormalizedCanvas(baseCanvas);
+  if (normalized) {
+    variants.push({ canvas: normalized, weight: 0.92 });
+  }
+
+  const softened = createSoftenedCanvas(baseCanvas);
+  variants.push({ canvas: softened, weight: 0.86 });
+  return variants;
+}
+
+function computeRectIoU(a, b) {
+  const ax2 = a.x + a.width;
+  const ay2 = a.y + a.height;
+  const bx2 = b.x + b.width;
+  const by2 = b.y + b.height;
+  const ix1 = Math.max(a.x, b.x);
+  const iy1 = Math.max(a.y, b.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  if (inter <= 0) {
+    return 0;
+  }
+
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function getDetectionScore(detection) {
+  const score = detection?.categories?.[0]?.score;
+  return Number.isFinite(score) ? score : 0;
+}
+
+function isLikelyFaceRect(rect, canvas) {
+  const area = rect.width * rect.height;
+  const totalArea = canvas.width * canvas.height;
+  const areaRatio = totalArea > 0 ? area / totalArea : 0;
+  const aspect = rect.width / Math.max(1, rect.height);
+  const centerY = (rect.y + rect.height * 0.5) / Math.max(1, canvas.height);
+
+  if (aspect < 0.55 || aspect > 1.7) {
+    return false;
+  }
+  if (areaRatio < 0.00025 || areaRatio > 0.65) {
+    return false;
+  }
+  if (centerY > 0.86) {
+    return false;
+  }
+  if (rect.y > canvas.height * 0.74 && rect.height > canvas.height * 0.18) {
+    return false;
+  }
+
+  return true;
+}
+
+function rankFaceCandidate(rect, canvas, baseScore, variantWeight) {
+  const area = rect.width * rect.height;
+  const totalArea = Math.max(1, canvas.width * canvas.height);
+  const areaRatio = area / totalArea;
+  const aspect = rect.width / Math.max(1, rect.height);
+  const centerY = (rect.y + rect.height * 0.5) / Math.max(1, canvas.height);
+  const aspectScore = Math.max(0, 1 - Math.abs(aspect - 1) / 0.7);
+  const sizeScore = Math.max(0, 1 - Math.abs(areaRatio - 0.035) / 0.08);
+  const positionScore = centerY < 0.62 ? 1 : centerY < 0.74 ? 0.8 : 0.35;
+
+  return baseScore * 1.45 + aspectScore * 0.85 + sizeScore * 0.4 + positionScore * 0.45 + variantWeight;
+}
+
+function suppressLowerRegionFalsePositives(candidates, canvas) {
+  if (candidates.length === 0 || canvas.height <= 0) {
+    return candidates;
+  }
+
+  const hasUpperStrongCandidate = candidates.some((candidate) => {
+    const centerY = (candidate.rect.y + candidate.rect.height * 0.5) / canvas.height;
+    return centerY < 0.66 && candidate.score > 1.45;
+  });
+
+  if (!hasUpperStrongCandidate) {
+    return candidates;
+  }
+
+  return candidates.map((candidate) => {
+    const centerY = (candidate.rect.y + candidate.rect.height * 0.5) / canvas.height;
+    if (centerY > FACE_LOWER_REGION_SUPPRESS_Y) {
+      return {
+        ...candidate,
+        score: candidate.score - 0.85,
+      };
+    }
+    return candidate;
+  });
+}
+
+async function detectFaces(source, confidence, sourceSize) {
+  const detector = await ensureFaceDetector(confidence);
+  const baseCanvas = createDetectionInputCanvas(source, sourceSize);
+  const scanTargets = [{ canvas: baseCanvas, roiMeta: null, weightBoost: 0 }];
+  for (const region of FACE_ROI_SCAN_REGIONS) {
+    const roi = createRoiScanCanvas(baseCanvas, region);
+    if (roi) {
+      scanTargets.push({ canvas: roi.canvas, roiMeta: roi, weightBoost: region.weightBoost || 0 });
+    }
+  }
+
+  const candidates = [];
+
+  for (const target of scanTargets) {
+    const variants = getDetectionVariants(target.canvas);
+    for (const variant of variants) {
+      const result = detector.detect(variant.canvas);
+      const detections = result?.detections || [];
+
+      for (const detection of detections) {
+        const variantRect = normalizeFaceRect(detection.boundingBox, variant.canvas);
+        if (!variantRect) {
+          continue;
+        }
+
+        const rect = mapRectFromRoiToBase(variantRect, target.roiMeta);
+        if (!isLikelyFaceRect(rect, baseCanvas)) {
+          continue;
+        }
+
+        const candidateScore = rankFaceCandidate(
+          rect,
+          baseCanvas,
+          getDetectionScore(detection),
+          variant.weight + target.weightBoost
+        );
+        candidates.push({ rect, score: candidateScore });
+      }
+    }
+  }
+
+  if (candidates.length === 0) {
+    return { faces: [], detectSize: { width: baseCanvas.width, height: baseCanvas.height } };
+  }
+
+  const refinedCandidates = suppressLowerRegionFalsePositives(candidates, baseCanvas);
+
+  refinedCandidates.sort((a, b) => b.score - a.score);
+  const uniqueRects = [];
+
+  for (const candidate of refinedCandidates) {
+    const isDuplicate = uniqueRects.some((kept) => computeRectIoU(kept, candidate.rect) >= FACE_CANDIDATE_IOU_THRESHOLD);
+    if (isDuplicate) {
+      continue;
+    }
+
+    uniqueRects.push(candidate.rect);
+    if (uniqueRects.length >= MAX_FACE_CANDIDATES) {
+      break;
+    }
+  }
+
+  return {
+    faces: uniqueRects,
+    detectSize: {
+      width: baseCanvas.width,
+      height: baseCanvas.height,
+    },
+  };
+}
+
+function mapRectToCanvas(rect, sourceWidth, sourceHeight, targetCanvas) {
+  if (sourceWidth <= 0 || sourceHeight <= 0 || targetCanvas.width <= 0 || targetCanvas.height <= 0) {
+    return null;
+  }
+
+  const scaleX = targetCanvas.width / sourceWidth;
+  const scaleY = targetCanvas.height / sourceHeight;
+  const mappedRect = {
+    x: rect.x * scaleX,
+    y: rect.y * scaleY,
+    width: rect.width * scaleX,
+    height: rect.height * scaleY,
+  };
+
+  return fitRectInCanvas(mappedRect, targetCanvas);
+}
+
+async function applyFaceEffects(canvas, faceOptions, detectSource, detectSourceSize) {
+  const sourceForDetect = detectSource || canvas;
+  const sourceSize = detectSourceSize || { width: canvas.width, height: canvas.height };
+  const detectionResult = await detectFaces(sourceForDetect, faceOptions.confidence, sourceSize);
+  const sourceFaces = detectionResult.faces;
+  const detectSize = detectionResult.detectSize;
+  const faces = sourceFaces
+    .map((rect) => mapRectToCanvas(rect, detectSize.width, detectSize.height, canvas))
+    .filter(Boolean);
 
   if (faces.length === 0) {
     return 0;
@@ -492,13 +1024,14 @@ async function applyFaceEffects(canvas, effect) {
   sourceCtx.drawImage(canvas, 0, 0);
 
   const ctx = canvas.getContext('2d');
-  for (const rect of faces) {
-    if (effect === 'emoji') {
-      applyEmojiMask(ctx, rect);
-    } else if (effect === 'pixelate') {
-      applyPixelateMask(ctx, sourceCanvas, rect);
+  for (const rawRect of faces) {
+    const rect = tuneFaceRect(rawRect, canvas, faceOptions.effect);
+    if (faceOptions.effect === 'emoji') {
+      applyEmojiMask(ctx, rect, faceOptions.emojiStrength);
+    } else if (faceOptions.effect === 'pixelate') {
+      applyPixelateMask(ctx, sourceCanvas, rect, faceOptions.pixelateStrength);
     } else {
-      applyBlurMask(ctx, sourceCanvas, rect);
+      applyBlurMask(ctx, sourceCanvas, rect, faceOptions.blurStrength);
     }
   }
 
@@ -558,7 +1091,15 @@ async function resizeFile(file, maxEdge, qualityPercent, faceOptions) {
 
   let faceCount = 0;
   if (faceOptions.enabled) {
-    faceCount = await applyFaceEffects(canvas, faceOptions.effect);
+    faceCount = await applyFaceEffects(
+      canvas,
+      faceOptions,
+      image,
+      {
+        width: ow,
+        height: oh,
+      }
+    );
   }
 
   const blob = await new Promise((resolve, reject) => {
@@ -649,7 +1190,38 @@ function clearAll() {
 }
 
 function syncFaceControls() {
-  faceEffectInput.disabled = !faceDetectionEnabledInput.checked;
+  const disabled = !faceDetectionEnabledInput.checked;
+  faceEffectInput.disabled = disabled;
+  faceConfidenceInput.disabled = disabled;
+  effectStrengthInput.disabled = disabled;
+}
+
+function setSliderValueDisplay(valueEl, inputEl, formatter) {
+  if (!valueEl || !inputEl) {
+    return;
+  }
+  valueEl.textContent = formatter(Number(inputEl.value));
+}
+
+function refreshFaceSliderLabels() {
+  setSliderValueDisplay(faceConfidenceValueEl, faceConfidenceInput, (value) => value.toFixed(2));
+  setSliderValueDisplay(effectStrengthValueEl, effectStrengthInput, (value) => `${value.toFixed(2)}x`);
+}
+
+function syncEffectStrengthUI() {
+  const effect = ['blur', 'pixelate', 'emoji'].includes(faceEffectInput.value) ? faceEffectInput.value : 'blur';
+  const effectConfig = EFFECT_STRENGTH_CONFIG[effect];
+  const rememberedValue = effectStrengthState[effect] ?? effectConfig.defaultValue;
+  const normalizedValue = clampNumber(rememberedValue, effectConfig.min, effectConfig.max, effectConfig.defaultValue);
+
+  effectStrengthLabelEl.textContent = effectConfig.label;
+  effectStrengthHintEl.textContent = `${effectConfig.hint}（範圍 ${effectConfig.min}x - ${effectConfig.max}x）`;
+  effectStrengthInput.min = String(effectConfig.min);
+  effectStrengthInput.max = String(effectConfig.max);
+  effectStrengthInput.step = String(effectConfig.step);
+  effectStrengthInput.value = normalizedValue.toFixed(2);
+  effectStrengthState[effect] = normalizedValue;
+  refreshFaceSliderLabels();
 }
 
 function getFaceDetectorLoadErrorMessage() {
@@ -720,7 +1292,7 @@ async function processAll() {
     if (faceOptions.enabled) {
       setStatus('初始化人面識別模型中…');
       try {
-        await ensureFaceDetector();
+        await ensureFaceDetector(faceOptions.confidence);
       } catch (error) {
         throw new Error(getFaceDetectorLoadErrorMessage());
       }
@@ -814,6 +1386,16 @@ themeToggleBtn.addEventListener('click', () => {
   applyTheme(nextTheme);
 });
 faceDetectionEnabledInput.addEventListener('change', syncFaceControls);
+faceConfidenceInput.addEventListener('input', refreshFaceSliderLabels);
+faceEffectInput.addEventListener('change', syncEffectStrengthUI);
+effectStrengthInput.addEventListener('input', () => {
+  const effect = ['blur', 'pixelate', 'emoji'].includes(faceEffectInput.value) ? faceEffectInput.value : 'blur';
+  const effectConfig = EFFECT_STRENGTH_CONFIG[effect];
+  const value = clampNumber(effectStrengthInput.value, effectConfig.min, effectConfig.max, effectConfig.defaultValue);
+  effectStrengthState[effect] = value;
+  effectStrengthInput.value = value.toFixed(2);
+  refreshFaceSliderLabels();
+});
 fileInput.addEventListener('change', () => {
   addFiles(Array.from(fileInput.files || []));
   fileInput.value = '';
@@ -852,5 +1434,7 @@ dropZone.addEventListener('drop', (event) => {
 });
 
 applyTheme(getPreferredTheme());
+syncEffectStrengthUI();
 syncFaceControls();
+refreshFaceSliderLabels();
 renderQueue();

@@ -18,9 +18,9 @@
       </div>
       <p class="sub">拖放相片即做。支援 HEIC/HEIF、JPG、PNG，全程本機處理，不上傳。</p>
       <div class="hero-badges">
-        <span class="badge">黑 / 白模式</span>
-        <span class="badge">本機人面遮罩</span>
-        <span class="badge">批次改名</span>
+        <span class="badge"><a href="https://lokchonmou.github.io/halftone_generator/" target="_blank" rel="noopener noreferrer">Halftone Generator</a></span>
+        <!-- <span class="badge">本機人面遮罩</span>
+        <span class="badge">批次改名</span> -->
       </div>
     </header>
 
@@ -110,6 +110,24 @@
             <option value="pixelate">打碼</option>
             <option value="emoji">Emoji cover</option>
           </select>
+        </label>
+
+        <label class="field">
+          <span class="field-inline">
+            <span>人面偵測 confidence</span>
+            <strong id="faceConfidenceValue">0.40</strong>
+          </span>
+          <input id="faceConfidence" type="range" min="0.1" max="0.95" step="0.01" value="0.4" disabled />
+          <p class="field-help">數值越低，越易檢出細面或側面；但誤判機會會增加。</p>
+        </label>
+
+        <label class="field">
+          <span class="field-inline">
+            <span id="effectStrengthLabel">Blur 濃度</span>
+            <strong id="effectStrengthValue">1.00x</strong>
+          </span>
+          <input id="effectStrength" type="range" min="0.6" max="2.5" step="0.05" value="1" disabled />
+          <p id="effectStrengthHint" class="field-help">切換效果時會帶返各自濃度設定。</p>
         </label>
       </div>
 
